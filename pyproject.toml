@@ -1,0 +1,14 @@
+[project]
+name = "you-posm"
+version = "1.0.0"
+description = "Simple store data collection platform with image uploads"
+requires-python = ">=3.11"
+dependencies = [
+    "streamlit>=1.35.0",
+    "pandas>=2.0.0",
+    "gspread>=5.12.0",
+    "google-auth>=2.23.0",
+    "google-cloud-storage>=2.10.0",
+    "pillow>=10.0.0",
+    "python-dotenv>=1.0.0",
+]
