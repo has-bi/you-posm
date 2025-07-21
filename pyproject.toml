@@ -2,6 +2,10 @@
 name = "you-posm"
 version = "1.0.0"
 description = "Simple store data collection platform with image uploads"
+readme = "README.md"
+authors = [
+    {name = "You-POSM Team", email = "team@you-posm.com"},
+]
 requires-python = ">=3.11"
 dependencies = [
     "streamlit>=1.35.0",
@@ -9,6 +13,92 @@ dependencies = [
     "gspread>=5.12.0",
     "google-auth>=2.23.0",
     "google-cloud-storage>=2.10.0",
+    "google-cloud-secret-manager>=2.18.0",
     "pillow>=10.0.0",
     "python-dotenv>=1.0.0",
 ]
+
+[project.optional-dependencies]
+dev = [
+    "black>=23.0.0",
+    "ruff>=0.1.0",
+    "mypy>=1.5.0",
+    "pytest>=7.4.0",
+    "pre-commit>=3.4.0",
+]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.ruff]
+target-version = "py311"
+line-length = 88
+select = [
+    "E",  # pycodestyle errors
+    "W",  # pycodestyle warnings
+    "F",  # pyflakes
+    "I",  # isort
+    "B",  # flake8-bugbear
+    "C4", # flake8-comprehensions
+    "UP", # pyupgrade
+    "ARG001", # unused-function-args
+    "SIM", # flake8-simplify
+    "TCH", # flake8-type-checking
+    "TID", # flake8-tidy-imports
+    "Q", # flake8-quotes
+    "FBT", # flake8-boolean-trap
+    "F401", # unused-import
+]
+ignore = [
+    "E501",  # line too long, handled by black
+    "B008",  # do not perform function calls in argument defaults
+    "C901",  # too complex
+    "ARG002", # unused-method-args
+    "TID252", # relative-imports
+]
+
+[tool.ruff.pyupgrade]
+keep-runtime-typing = true
+
+[tool.black]
+target-version = ['py311']
+line-length = 88
+include = '\.pyi?$'
+exclude = '''
+/(
+    \.eggs
+  | \.git
+  | \.hg
+  | \.mypy_cache
+  | \.tox
+  | \.venv
+  | _build
+  | buck-out
+  | build
+  | dist
+)/
+'''
+
+[tool.mypy]
+python_version = "3.11"
+warn_return_any = true
+warn_unused_configs = true
+disallow_untyped_defs = true
+disallow_incomplete_defs = true
+check_untyped_defs = true
+disallow_untyped_decorators = true
+no_implicit_optional = true
+warn_redundant_casts = true
+warn_unused_ignores = true
+warn_no_return = true
+warn_unreachable = true
+strict_equality = true
+
+[[tool.mypy.overrides]]
+module = [
+    "streamlit.*",
+    "gspread.*",
+    "PIL.*",
+]
+ignore_missing_imports = true

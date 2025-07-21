@@ -181,46 +181,88 @@ class YouPosmHandler:
         self._setup_connections()
     
     def _setup_connections(self):
-        """Setup Google Cloud connections using environment variables or credentials file"""
+        """Setup Google Cloud connections using Secret Manager or environment variables"""
         try:
-            # Get configuration
-            bucket_name = os.getenv("GCS_BUCKET_NAME")
-            spreadsheet_id = os.getenv("SPREADSHEET_ID")
+            # Try to get configuration from multiple sources
+            bucket_name = None
+            spreadsheet_id = None
+            creds_dict = None
             
+            # First try Secret Manager (preferred in production)
+            try:
+                from google.cloud import secretmanager
+                
+                # Initialize Secret Manager client with default credentials
+                secret_client = secretmanager.SecretManagerServiceClient()
+                project_id = "youvit-ai-chatbot"
+                
+                # Get credentials from Secret Manager
+                try:
+                    creds_secret_name = f"projects/{project_id}/secrets/youposm-google-credentials/versions/latest"
+                    creds_response = secret_client.access_secret_version(request={"name": creds_secret_name})
+                    creds_dict = json.loads(creds_response.payload.data.decode("UTF-8"))
+                except Exception as e:
+                    st.info(f"Note: Could not load credentials from Secret Manager: {str(e)}")
+                
+                # Get bucket name from Secret Manager
+                try:
+                    bucket_secret_name = f"projects/{project_id}/secrets/youposm-gcs-bucket/versions/latest"
+                    bucket_response = secret_client.access_secret_version(request={"name": bucket_secret_name})
+                    bucket_name = bucket_response.payload.data.decode("UTF-8")
+                except Exception as e:
+                    st.info(f"Note: Could not load bucket name from Secret Manager: {str(e)}")
+                
+                # Get spreadsheet ID from Secret Manager
+                try:
+                    sheet_secret_name = f"projects/{project_id}/secrets/youposm-spreadsheet-id/versions/latest"
+                    sheet_response = secret_client.access_secret_version(request={"name": sheet_secret_name})
+                    spreadsheet_id = sheet_response.payload.data.decode("UTF-8")
+                except Exception as e:
+                    st.info(f"Note: Could not load spreadsheet ID from Secret Manager: {str(e)}")
+                    
+            except ImportError:
+                st.info("Secret Manager not available, falling back to environment variables")
+            except Exception as e:
+                st.info(f"Secret Manager access failed: {str(e)}")
+            
+            # Fallback to environment variables if Secret Manager failed
             if not bucket_name:
-                st.error("❌ GCS_BUCKET_NAME environment variable not set")
+                bucket_name = os.getenv("GCS_BUCKET_NAME")
+            if not spreadsheet_id:
+                spreadsheet_id = os.getenv("SPREADSHEET_ID")
+            if not creds_dict:
+                # Try environment variables for credentials
+                google_creds_json = os.getenv("GOOGLE_CREDENTIALS")
+                if google_creds_json:
+                    try:
+                        creds_dict = json.loads(google_creds_json)
+                    except json.JSONDecodeError:
+                        # Maybe it's a file path
+                        if os.path.exists(google_creds_json):
+                            with open(google_creds_json, 'r') as f:
+                                creds_dict = json.load(f)
+                
+                # Try default credentials.json file
+                if not creds_dict and os.path.exists("credentials.json"):
+                    with open("credentials.json", 'r') as f:
+                        creds_dict = json.load(f)
+                
+                # Try /app/credentials.json (for Docker)
+                if not creds_dict and os.path.exists("/app/credentials.json"):
+                    with open("/app/credentials.json", 'r') as f:
+                        creds_dict = json.load(f)
+            
+            # Validate required configuration
+            if not bucket_name:
+                st.error("❌ GCS bucket name not found in Secret Manager or environment variables")
                 return False
                 
             if not spreadsheet_id:
-                st.error("❌ SPREADSHEET_ID environment variable not set")
+                st.error("❌ Spreadsheet ID not found in Secret Manager or environment variables")
                 return False
             
-            # Get Google credentials - try different sources
-            creds_dict = None
-            
-            # Option 1: Try GOOGLE_CREDENTIALS as JSON string
-            google_creds_json = os.getenv("GOOGLE_CREDENTIALS")
-            if google_creds_json:
-                try:
-                    creds_dict = json.loads(google_creds_json)
-                except json.JSONDecodeError:
-                    # Maybe it's a file path
-                    if os.path.exists(google_creds_json):
-                        with open(google_creds_json, 'r') as f:
-                            creds_dict = json.load(f)
-            
-            # Option 2: Try default credentials.json file
-            if not creds_dict and os.path.exists("credentials.json"):
-                with open("credentials.json", 'r') as f:
-                    creds_dict = json.load(f)
-            
-            # Option 3: Try /app/credentials.json (for Docker)
-            if not creds_dict and os.path.exists("/app/credentials.json"):
-                with open("/app/credentials.json", 'r') as f:
-                    creds_dict = json.load(f)
-            
             if not creds_dict:
-                st.error("❌ Google Cloud credentials not found. Set GOOGLE_CREDENTIALS or provide credentials.json")
+                st.error("❌ Google Cloud credentials not found in Secret Manager, environment variables, or credential files")
                 return False
             
             # Setup Google Sheets
