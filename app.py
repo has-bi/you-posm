@@ -9,10 +9,11 @@ from datetime import datetime, date
 import os
 import json
 import uuid
+import time
 from typing import Optional
 from dotenv import load_dotenv
 
-# Load environment variables
+# Load environment variables (for local development)
 load_dotenv()
 
 # Page configuration
@@ -96,7 +97,7 @@ st.markdown("""
     .form-title {
         font-size: 1.2rem;
         font-weight: 600;
-        color: #ffff;
+        color: #333;
         margin: 0 0 1rem 0;
         text-align: center;
     }
@@ -170,7 +171,7 @@ st.markdown("""
 """, unsafe_allow_html=True)
 
 class YouPosmHandler:
-    """You-POSM handler with hidden spreadsheet backend"""
+    """You-POSM handler with Google Cloud Secret Manager backend"""
     
     def __init__(self):
         self.gc = None
@@ -180,50 +181,44 @@ class YouPosmHandler:
         self.connection_status = {"sheets": False, "storage": False}
         self._setup_connections()
     
+    def _get_secret(self, secret_name: str, project_id: str) -> Optional[str]:
+        """Get secret from Secret Manager with error handling"""
+        try:
+            from google.cloud import secretmanager
+            client = secretmanager.SecretManagerServiceClient()
+            name = f"projects/{project_id}/secrets/{secret_name}/versions/latest"
+            response = client.access_secret_version(request={"name": name})
+            return response.payload.data.decode("UTF-8")
+        except Exception as e:
+            st.warning(f"Could not get {secret_name} from Secret Manager: {str(e)}")
+            return None
+    
     def _setup_connections(self):
         """Setup Google Cloud connections using Secret Manager or environment variables"""
         try:
-            # Try to get configuration from multiple sources
+            # Get project ID from environment or default
+            project_id = os.getenv("GOOGLE_CLOUD_PROJECT", "youvit-ai-chatbot")
+            
+            # Initialize variables
             bucket_name = None
             spreadsheet_id = None
             creds_dict = None
             
-            # First try Secret Manager (preferred in production)
+            # Try to get configuration from Secret Manager first
             try:
-                from google.cloud import secretmanager
-                
-                # Initialize Secret Manager client with default credentials
-                secret_client = secretmanager.SecretManagerServiceClient()
-                project_id = "youvit-ai-chatbot"
+                # Get secrets from Secret Manager
+                bucket_name = self._get_secret("youposm-gcs-bucket", project_id)
+                spreadsheet_id = self._get_secret("youposm-spreadsheet-id", project_id)
                 
                 # Get credentials from Secret Manager
-                try:
-                    creds_secret_name = f"projects/{project_id}/secrets/youposm-google-credentials/versions/latest"
-                    creds_response = secret_client.access_secret_version(request={"name": creds_secret_name})
-                    creds_dict = json.loads(creds_response.payload.data.decode("UTF-8"))
-                except Exception as e:
-                    st.info(f"Note: Could not load credentials from Secret Manager: {str(e)}")
-                
-                # Get bucket name from Secret Manager
-                try:
-                    bucket_secret_name = f"projects/{project_id}/secrets/youposm-gcs-bucket/versions/latest"
-                    bucket_response = secret_client.access_secret_version(request={"name": bucket_secret_name})
-                    bucket_name = bucket_response.payload.data.decode("UTF-8")
-                except Exception as e:
-                    st.info(f"Note: Could not load bucket name from Secret Manager: {str(e)}")
-                
-                # Get spreadsheet ID from Secret Manager
-                try:
-                    sheet_secret_name = f"projects/{project_id}/secrets/youposm-spreadsheet-id/versions/latest"
-                    sheet_response = secret_client.access_secret_version(request={"name": sheet_secret_name})
-                    spreadsheet_id = sheet_response.payload.data.decode("UTF-8")
-                except Exception as e:
-                    st.info(f"Note: Could not load spreadsheet ID from Secret Manager: {str(e)}")
+                creds_json = self._get_secret("youposm-google-credentials", project_id)
+                if creds_json:
+                    creds_dict = json.loads(creds_json)
                     
             except ImportError:
-                st.info("Secret Manager not available, falling back to environment variables")
+                st.info("🔄 Secret Manager not available, using environment variables")
             except Exception as e:
-                st.info(f"Secret Manager access failed: {str(e)}")
+                st.info(f"🔄 Secret Manager access failed: {str(e)}, falling back to environment variables")
             
             # Fallback to environment variables if Secret Manager failed
             if not bucket_name:
@@ -242,14 +237,9 @@ class YouPosmHandler:
                             with open(google_creds_json, 'r') as f:
                                 creds_dict = json.load(f)
                 
-                # Try default credentials.json file
+                # Try default credentials.json file (for local development)
                 if not creds_dict and os.path.exists("credentials.json"):
                     with open("credentials.json", 'r') as f:
-                        creds_dict = json.load(f)
-                
-                # Try /app/credentials.json (for Docker)
-                if not creds_dict and os.path.exists("/app/credentials.json"):
-                    with open("/app/credentials.json", 'r') as f:
                         creds_dict = json.load(f)
             
             # Validate required configuration
@@ -266,41 +256,74 @@ class YouPosmHandler:
                 return False
             
             # Setup Google Sheets
-            sheets_creds = Credentials.from_service_account_info(
-                creds_dict, 
-                scopes=["https://www.googleapis.com/auth/spreadsheets", 
-                       "https://www.googleapis.com/auth/drive"]
-            )
-            self.gc = gspread.authorize(sheets_creds)
-            
-            # Connect to the backend spreadsheet
             try:
+                sheets_creds = Credentials.from_service_account_info(
+                    creds_dict, 
+                    scopes=[
+                        "https://www.googleapis.com/auth/spreadsheets", 
+                        "https://www.googleapis.com/auth/drive"
+                    ]
+                )
+                self.gc = gspread.authorize(sheets_creds)
+                
+                # Connect to the backend spreadsheet
                 spreadsheet = self.gc.open_by_key(spreadsheet_id)
                 self.worksheet = spreadsheet.sheet1
+                
+                # Verify sheet structure and create headers if needed
+                self._ensure_sheet_structure()
+                
                 self.connection_status["sheets"] = True
+                
             except Exception as e:
-                st.error(f"❌ Cannot connect to spreadsheet: {str(e)}")
+                st.error(f"❌ Cannot connect to Google Sheets: {str(e)}")
                 self.connection_status["sheets"] = False
             
             # Setup Google Cloud Storage
-            storage_creds = Credentials.from_service_account_info(
-                creds_dict, 
-                scopes=["https://www.googleapis.com/auth/cloud-platform"]
-            )
-            self.storage_client = storage.Client(credentials=storage_creds)
-            
             try:
+                storage_creds = Credentials.from_service_account_info(
+                    creds_dict, 
+                    scopes=["https://www.googleapis.com/auth/cloud-platform"]
+                )
+                self.storage_client = storage.Client(credentials=storage_creds)
                 self.bucket = self.storage_client.bucket(bucket_name)
+                
                 # Test bucket access
                 self.bucket.exists()
                 self.connection_status["storage"] = True
+                
             except Exception as e:
-                st.error(f"❌ Cannot connect to storage bucket: {str(e)}")
+                st.error(f"❌ Cannot connect to storage bucket '{bucket_name}': {str(e)}")
                 self.connection_status["storage"] = False
                 
         except Exception as e:
             st.error(f"❌ Setup error: {str(e)}")
             return False
+    
+    def _ensure_sheet_structure(self):
+        """Ensure the spreadsheet has the correct headers"""
+        try:
+            # Expected headers
+            expected_headers = [
+                'Store_Name', 'Employee_Name', 'Date', 
+                'Before_Image_URL', 'After_Image_URL', 
+                'Timestamp', 'Status'
+            ]
+            
+            # Get current headers
+            try:
+                current_headers = self.worksheet.row_values(1)
+            except:
+                current_headers = []
+            
+            # If no headers or headers don't match, set them
+            if not current_headers or current_headers != expected_headers:
+                self.worksheet.clear()
+                self.worksheet.append_row(expected_headers)
+                st.info("📋 Spreadsheet headers configured")
+                
+        except Exception as e:
+            st.warning(f"Could not verify spreadsheet structure: {str(e)}")
     
     def get_existing_data(self):
         """Get existing data from spreadsheet for dropdowns"""
@@ -320,10 +343,10 @@ class YouPosmHandler:
             employees = []
             
             if 'Store_Name' in df.columns:
-                stores = sorted(df['Store_Name'].dropna().unique().tolist())
+                stores = sorted([s for s in df['Store_Name'].dropna().unique().tolist() if s])
             
             if 'Employee_Name' in df.columns:
-                employees = sorted(df['Employee_Name'].dropna().unique().tolist())
+                employees = sorted([e for e in df['Employee_Name'].dropna().unique().tolist() if e])
             
             return stores, employees
             
@@ -332,23 +355,27 @@ class YouPosmHandler:
             return [], []
     
     def upload_image(self, image: Image.Image, store: str, employee: str, img_type: str) -> Optional[str]:
-        """Upload image to GCS with organized structure"""
+        """Upload image to GCS with uniform bucket-level access"""
         try:
             if not self.bucket:
+                st.error("❌ Storage bucket not connected")
                 return None
             
             # Clean names for folder structure
             clean_store = "".join(c for c in store if c.isalnum() or c in (' ', '-', '_')).strip().replace(' ', '_')
             clean_employee = "".join(c for c in employee if c.isalnum() or c in (' ', '-', '_')).strip().replace(' ', '_')
             
-            # Generate path: you-posm/{store}/{employee}/{date}/{type}/{timestamp_uuid}.png
+            # Generate path
             date_str = datetime.now().strftime("%Y-%m-%d")
             timestamp = datetime.now().strftime("%H%M%S")
             unique_id = str(uuid.uuid4())[:8]
             
-            path = f"you-posm/{clean_store}/{clean_employee}/{date_str}/{img_type}/{timestamp}_{unique_id}.png"
+            path = f"you-posm/{clean_store}/{clean_employee}/{date_str}/{img_type}/{timestamp}_{unique_id}.jpg"
             
             # Optimize image
+            if image.mode in ("RGBA", "P"):
+                image = image.convert("RGB")
+            
             if image.width > 1920:
                 ratio = 1920 / image.width
                 new_height = int(image.height * ratio)
@@ -356,14 +383,17 @@ class YouPosmHandler:
             
             # Upload to GCS
             img_bytes = io.BytesIO()
-            image.save(img_bytes, format='PNG', optimize=True)
+            image.save(img_bytes, format='JPEG', quality=85, optimize=True)
             img_bytes.seek(0)
             
             blob = self.bucket.blob(path)
-            blob.upload_from_file(img_bytes, content_type='image/png')
-            blob.make_public()
+            blob.upload_from_file(img_bytes, content_type='image/jpeg')
             
-            return blob.public_url
+            # Don't try to make public - return the blob name instead
+            # For uniform bucket-level access, we use a different URL format
+            public_url = f"https://storage.googleapis.com/{self.bucket.name}/{path}"
+            
+            return public_url
             
         except Exception as e:
             st.error(f"❌ Image upload failed: {str(e)}")
@@ -399,13 +429,14 @@ def main():
     st.markdown("""
     <div class="main-header">
         <h1>📊 You-POSM</h1>
-        <p>Store Data Collection</p>
+        <p>Store Data Collection System</p>
     </div>
     """, unsafe_allow_html=True)
     
     # Initialize handler
     if 'handler' not in st.session_state:
-        st.session_state.handler = YouPosmHandler()
+        with st.spinner("🔧 Initializing connections..."):
+            st.session_state.handler = YouPosmHandler()
     
     # Connection status (compact)
     if st.session_state.handler.connection_status["sheets"] and st.session_state.handler.connection_status["storage"]:
@@ -418,18 +449,22 @@ def main():
         st.error("""
         ❌ **Configuration Required**
         
-        Please ensure you have:
-        - `GCS_BUCKET_NAME` environment variable
-        - `SPREADSHEET_ID` environment variable  
-        - Google credentials via one of:
-          - `GOOGLE_CREDENTIALS` env var (JSON string or file path)
-          - `credentials.json` file in project root
-          - `/app/credentials.json` file (for Docker)
+        The system needs proper configuration to work. Please check:
+        
+        **For Cloud Run deployment:**
+        - Secret Manager secrets are configured
+        - Service account has proper permissions
+        - Google Spreadsheet is shared with service account
+        
+        **For local development:**
+        - `credentials.json` file in project root
+        - Environment variables in `.env` file
         """)
         st.stop()
     
     # Get data for dropdowns
-    stores, employees = st.session_state.handler.get_existing_data()
+    with st.spinner("📊 Loading data..."):
+        stores, employees = st.session_state.handler.get_existing_data()
     
     # Main data collection form
     st.markdown('<div class="form-title">➕ Add New Entry</div>', unsafe_allow_html=True)
@@ -441,28 +476,27 @@ def main():
         with col1:
             # Store selection
             store_options = ["Select Store..."] + stores + ["+ New Store"]
-            store_selection = st.selectbox("🏪", store_options, label_visibility="collapsed")
+            store_selection = st.selectbox("🏪 Store", store_options)
             
             store_name = ""
             if store_selection == "+ New Store":
-                store_name = st.text_input("", placeholder="Enter store name", key="new_store")
+                store_name = st.text_input("New Store Name", placeholder="Enter store name", key="new_store")
             elif store_selection and store_selection != "Select Store...":
                 store_name = store_selection
         
         with col2:
             # Employee selection
-            employee_options = ["Select Person..."] + employees + ["+ New Person"]
-            employee_selection = st.selectbox("👤", employee_options, label_visibility="collapsed")
+            employee_options = ["Select Employee..."] + employees + ["+ New Employee"]
+            employee_selection = st.selectbox("👤 Employee", employee_options)
             
             employee_name = ""
-            if employee_selection == "+ New Person":
-                employee_name = st.text_input("", placeholder="Enter person name", key="new_employee")
-            elif employee_selection and employee_selection != "Select Person...":
+            if employee_selection == "+ New Employee":
+                employee_name = st.text_input("New Employee Name", placeholder="Enter employee name", key="new_employee")
+            elif employee_selection and employee_selection != "Select Employee...":
                 employee_name = employee_selection
         
         # Date (compact)
-        entry_date = st.date_input("📅 Date", value=date.today(), label_visibility="collapsed")
-        
+        entry_date = st.date_input("📅 Date", value=date.today())
         
         # Image uploads (mobile-optimized)
         st.markdown("**📸 Upload Images**")
@@ -471,9 +505,9 @@ def main():
         with col1:
             st.markdown("**Before**")
             before_image = st.file_uploader(
-                "before", 
+                "Upload Before Image", 
                 type=['png', 'jpg', 'jpeg'],
-                label_visibility="collapsed"
+                key="before_img"
             )
             if before_image:
                 st.image(before_image, use_column_width=True)
@@ -481,9 +515,9 @@ def main():
         with col2:
             st.markdown("**After**")
             after_image = st.file_uploader(
-                "after", 
+                "Upload After Image", 
                 type=['png', 'jpg', 'jpeg'],
-                label_visibility="collapsed"
+                key="after_img"
             )
             if after_image:
                 st.image(after_image, use_column_width=True)
@@ -494,14 +528,14 @@ def main():
         if submitted:
             # Validation
             errors = []
-            if not store_name:
-                errors.append("Store name required")
-            if not employee_name:
-                errors.append("Person name required")
+            if not store_name.strip():
+                errors.append("Store name is required")
+            if not employee_name.strip():
+                errors.append("Employee name is required")
             if not before_image:
-                errors.append("Before image required")
+                errors.append("Before image is required")
             if not after_image:
-                errors.append("After image required")
+                errors.append("After image is required")
             
             if errors:
                 st.markdown(f"""
@@ -512,45 +546,57 @@ def main():
                 """, unsafe_allow_html=True)
             else:
                 # Process submission
-                with st.spinner("📤 Uploading..."):
-                    before_img = Image.open(before_image)
-                    after_img = Image.open(after_image)
-                    
-                    before_url = st.session_state.handler.upload_image(before_img, store_name, employee_name, "before")
-                    after_url = st.session_state.handler.upload_image(after_img, store_name, employee_name, "after")
-                    
-                    if before_url and after_url:
-                        # Prepare data for backend spreadsheet
-                        data = {
-                            'store_name': store_name,
-                            'employee_name': employee_name,
-                            'date': entry_date.strftime("%Y-%m-%d"),
-                            'before_image_url': before_url,
-                            'after_image_url': after_url,
-                            'timestamp': datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-                        }
+                with st.spinner("📤 Uploading data and images..."):
+                    try:
+                        before_img = Image.open(before_image)
+                        after_img = Image.open(after_image)
                         
-                        if st.session_state.handler.save_data(data):
-                            st.markdown("""
-                            <div class="message-box success-box">
-                                <strong>✅ Success!</strong><br>
-                                Data uploaded successfully.
-                            </div>
-                            """, unsafe_allow_html=True)
-                            st.balloons()
+                        # Upload images
+                        before_url = st.session_state.handler.upload_image(
+                            before_img, store_name, employee_name, "before"
+                        )
+                        after_url = st.session_state.handler.upload_image(
+                            after_img, store_name, employee_name, "after"
+                        )
+                        
+                        if before_url and after_url:
+                            # Prepare data for backend spreadsheet
+                            data = {
+                                'store_name': store_name.strip(),
+                                'employee_name': employee_name.strip(),
+                                'date': entry_date.strftime("%Y-%m-%d"),
+                                'before_image_url': before_url,
+                                'after_image_url': after_url,
+                                'timestamp': datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                            }
                             
-                            # Show uploaded images (mobile optimized)
-                            st.markdown("**📷 Uploaded Images:**")
-                            col1, col2 = st.columns(2)
-                            with col1:
-                                st.image(before_url, caption="Before", use_column_width=True)
-                            with col2:
-                                st.image(after_url, caption="After", use_column_width=True)
+                            if st.session_state.handler.save_data(data):
+                                st.markdown("""
+                                <div class="message-box success-box">
+                                    <strong>✅ Success!</strong><br>
+                                    Data and images uploaded successfully.
+                                </div>
+                                """, unsafe_allow_html=True)
+                                st.balloons()
                                 
-                            # Force refresh
-                            st.rerun()
-    
-    st.markdown('</div>', unsafe_allow_html=True)
+                                # Show uploaded images (mobile optimized)
+                                st.markdown("**📷 Uploaded Images:**")
+                                col1, col2 = st.columns(2)
+                                with col1:
+                                    st.image(before_url, caption=f"Before - {store_name}", use_column_width=True)
+                                with col2:
+                                    st.image(after_url, caption=f"After - {store_name}", use_column_width=True)
+                                
+                                # Auto-refresh in 3 seconds to show updated dropdown data
+                                time.sleep(2)
+                                st.rerun()
+                            else:
+                                st.error("❌ Failed to save data to spreadsheet")
+                        else:
+                            st.error("❌ Failed to upload images")
+                            
+                    except Exception as e:
+                        st.error(f"❌ Error processing submission: {str(e)}")
 
 if __name__ == "__main__":
     main()
