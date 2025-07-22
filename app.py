@@ -10,7 +10,7 @@ import os
 import json
 import uuid
 import time
-from typing import Optional
+from typing import Optional, Tuple, List
 from dotenv import load_dotenv
 
 # Load environment variables (for local development)
@@ -97,7 +97,7 @@ st.markdown("""
     .form-title {
         font-size: 1.2rem;
         font-weight: 600;
-        color: #333;
+        color: #ffff;
         margin: 0 0 1rem 0;
         text-align: center;
     }
@@ -177,7 +177,8 @@ class YouPosmHandler:
         self.gc = None
         self.storage_client = None
         self.bucket = None
-        self.worksheet = None
+        self.main_worksheet = None  # Sheet1 for main data
+        self.employee_worksheet = None  # Employee sheet for employee data
         self.connection_status = {"sheets": False, "storage": False}
         self._setup_connections()
     
@@ -268,7 +269,22 @@ class YouPosmHandler:
                 
                 # Connect to the backend spreadsheet
                 spreadsheet = self.gc.open_by_key(spreadsheet_id)
-                self.worksheet = spreadsheet.sheet1
+                
+                # Get main worksheet (Sheet1)
+                try:
+                    self.main_worksheet = spreadsheet.sheet1
+                except:
+                    # If Sheet1 doesn't exist, create it
+                    self.main_worksheet = spreadsheet.add_worksheet(title="Sheet1", rows="1000", cols="10")
+                
+                # Get or create employee worksheet
+                try:
+                    self.employee_worksheet = spreadsheet.worksheet("Employee Sheet")
+                except:
+                    # Create employee sheet if it doesn't exist
+                    self.employee_worksheet = spreadsheet.add_worksheet(title="Employee Sheet", rows="1000", cols="1")
+                    # Set headers for employee sheet
+                    self.employee_worksheet.append_row(['Employee_Name'])
                 
                 # Verify sheet structure and create headers if needed
                 self._ensure_sheet_structure()
@@ -301,58 +317,139 @@ class YouPosmHandler:
             return False
     
     def _ensure_sheet_structure(self):
-        """Ensure the spreadsheet has the correct headers"""
+        """Ensure the spreadsheets have the correct headers"""
         try:
-            # Expected headers
-            expected_headers = [
+            # Main sheet headers
+            main_expected_headers = [
                 'Store_Name', 'Employee_Name', 'Date', 
                 'Before_Image_URL', 'After_Image_URL', 
                 'Timestamp', 'Status'
             ]
             
-            # Get current headers
+            # Get current headers for main sheet
             try:
-                current_headers = self.worksheet.row_values(1)
+                current_main_headers = self.main_worksheet.row_values(1)
             except:
-                current_headers = []
+                current_main_headers = []
             
             # If no headers or headers don't match, set them
-            if not current_headers or current_headers != expected_headers:
-                self.worksheet.clear()
-                self.worksheet.append_row(expected_headers)
-                st.info("📋 Spreadsheet headers configured")
+            if not current_main_headers or current_main_headers != main_expected_headers:
+                self.main_worksheet.clear()
+                self.main_worksheet.append_row(main_expected_headers)
+                st.info("📋 Main spreadsheet headers configured")
+            
+            # Employee sheet headers
+            employee_expected_headers = ['Employee_Name']
+            
+            # Get current headers for employee sheet
+            try:
+                current_employee_headers = self.employee_worksheet.row_values(1)
+            except:
+                current_employee_headers = []
+            
+            # If no headers or headers don't match, set them
+            if not current_employee_headers or current_employee_headers != employee_expected_headers:
+                if current_employee_headers:  # Only clear if there are existing headers
+                    self.employee_worksheet.clear()
+                self.employee_worksheet.append_row(employee_expected_headers)
+                st.info("📋 Employee spreadsheet headers configured")
                 
         except Exception as e:
             st.warning(f"Could not verify spreadsheet structure: {str(e)}")
     
-    def get_existing_data(self):
-        """Get existing data from spreadsheet for dropdowns"""
+    def get_employee_data(self) -> Tuple[List[str], List[str]]:
+        """Get employee data from the employee sheet"""
         try:
-            if not self.worksheet:
+            if not self.employee_worksheet:
                 return [], []
             
-            # Get all records
-            records = self.worksheet.get_all_records()
+            # Get all records from employee sheet
+            records = self.employee_worksheet.get_all_records()
             if not records:
                 return [], []
             
             df = pd.DataFrame(records)
             
-            # Extract unique stores and employees
-            stores = []
+            # Extract employees from Employee_Name column
             employees = []
-            
-            if 'Store_Name' in df.columns:
-                stores = sorted([s for s in df['Store_Name'].dropna().unique().tolist() if s])
-            
             if 'Employee_Name' in df.columns:
                 employees = sorted([e for e in df['Employee_Name'].dropna().unique().tolist() if e])
+            
+            # For stores, we'll get from main sheet instead
+            stores = self.get_stores_from_main_sheet()
             
             return stores, employees
             
         except Exception as e:
-            st.error(f"❌ Error loading existing data: {str(e)}")
+            st.error(f"❌ Error loading employee data: {str(e)}")
             return [], []
+    
+    def get_stores_from_main_sheet(self) -> List[str]:
+        """Get unique stores from main sheet"""
+        try:
+            if not self.main_worksheet:
+                return []
+            
+            records = self.main_worksheet.get_all_records()
+            if not records:
+                return []
+            
+            df = pd.DataFrame(records)
+            
+            if 'Store_Name' in df.columns:
+                stores = sorted([s for s in df['Store_Name'].dropna().unique().tolist() if s])
+                return stores
+            
+            return []
+            
+        except Exception as e:
+            return []
+    
+    def get_employees_by_store(self, store_name: str) -> List[str]:
+        """Get all employees from employee sheet (not filtered by store since employee sheet only has names)"""
+        try:
+            if not self.employee_worksheet:
+                return []
+            
+            # Get all records from employee sheet
+            records = self.employee_worksheet.get_all_records()
+            if not records:
+                return []
+            
+            df = pd.DataFrame(records)
+            
+            # Return all employees since we don't have store association in employee sheet
+            if 'Employee_Name' in df.columns:
+                employees = sorted([e for e in df['Employee_Name'].dropna().unique().tolist() if e])
+                return employees
+            
+            return []
+            
+        except Exception as e:
+            st.error(f"❌ Error loading employees: {str(e)}")
+            return []
+    
+    def add_employee_to_sheet(self, store_name: str, employee_name: str) -> bool:
+        """Add new employee to employee sheet"""
+        try:
+            if not self.employee_worksheet:
+                return False
+            
+            # Check if employee already exists
+            records = self.employee_worksheet.get_all_records()
+            for record in records:
+                if record.get('Employee_Name', '').strip() == employee_name.strip():
+                    return True  # Already exists
+            
+            # Add new employee (only employee name)
+            row_data = [employee_name.strip()]
+            
+            self.employee_worksheet.append_row(row_data)
+            return True
+            
+        except Exception as e:
+            st.error(f"❌ Error adding employee: {str(e)}")
+            return False
     
     def upload_image(self, image: Image.Image, store: str, employee: str, img_type: str) -> Optional[str]:
         """Upload image to GCS with uniform bucket-level access"""
@@ -400,13 +497,13 @@ class YouPosmHandler:
             return None
     
     def save_data(self, data: dict) -> bool:
-        """Save data to backend spreadsheet"""
+        """Save data to main spreadsheet (Sheet1)"""
         try:
-            if not self.worksheet:
-                st.error("❌ Spreadsheet not connected")
+            if not self.main_worksheet:
+                st.error("❌ Main spreadsheet not connected")
                 return False
             
-            # Prepare row data matching spreadsheet structure
+            # Prepare row data matching main spreadsheet structure
             row_data = [
                 data['store_name'],           # Store_Name
                 data['employee_name'],        # Employee_Name  
@@ -414,10 +511,10 @@ class YouPosmHandler:
                 data['before_image_url'],     # Before_Image_URL
                 data['after_image_url'],      # After_Image_URL
                 data['timestamp'],            # Timestamp
-                'Active'                      # Status
+                'visited'                     # Status - changed from 'Active' to 'visited'
             ]
             
-            self.worksheet.append_row(row_data)
+            self.main_worksheet.append_row(row_data)
             return True
             
         except Exception as e:
@@ -462,9 +559,9 @@ def main():
         """)
         st.stop()
     
-    # Get data for dropdowns
-    with st.spinner("📊 Loading data..."):
-        stores, employees = st.session_state.handler.get_existing_data()
+    # Get employee data from employee sheet
+    with st.spinner("📊 Loading employee data..."):
+        stores, all_employees = st.session_state.handler.get_employee_data()
     
     # Main data collection form
     st.markdown('<div class="form-title">➕ Add New Entry</div>', unsafe_allow_html=True)
@@ -476,7 +573,7 @@ def main():
         with col1:
             # Store selection
             store_options = ["Select Store..."] + stores + ["+ New Store"]
-            store_selection = st.selectbox("🏪 Store", store_options)
+            store_selection = st.selectbox("🏪 Store", store_options, key="store_select")
             
             store_name = ""
             if store_selection == "+ New Store":
@@ -485,9 +582,13 @@ def main():
                 store_name = store_selection
         
         with col2:
-            # Employee selection
-            employee_options = ["Select Employee..."] + employees + ["+ New Employee"]
-            employee_selection = st.selectbox("👤 Employee", employee_options)
+            # Employee selection - show all employees from employee sheet
+            if len(all_employees) > 0:
+                employee_options = ["Select Employee..."] + all_employees + ["+ New Employee"]
+            else:
+                employee_options = ["+ New Employee"]
+            
+            employee_selection = st.selectbox("👤 Employee", employee_options, key="employee_select")
             
             employee_name = ""
             if employee_selection == "+ New Employee":
@@ -551,6 +652,13 @@ def main():
                         before_img = Image.open(before_image)
                         after_img = Image.open(after_image)
                         
+                        # Add employee to employee sheet if new
+                        if employee_selection == "+ New Employee":
+                            success = st.session_state.handler.add_employee_to_sheet(store_name, employee_name)
+                            if not success:
+                                st.error("❌ Failed to add employee to employee sheet")
+                                st.stop()
+                        
                         # Upload images
                         before_url = st.session_state.handler.upload_image(
                             before_img, store_name, employee_name, "before"
@@ -560,7 +668,7 @@ def main():
                         )
                         
                         if before_url and after_url:
-                            # Prepare data for backend spreadsheet
+                            # Prepare data for main spreadsheet (Sheet1)
                             data = {
                                 'store_name': store_name.strip(),
                                 'employee_name': employee_name.strip(),
@@ -574,7 +682,7 @@ def main():
                                 st.markdown("""
                                 <div class="message-box success-box">
                                     <strong>✅ Success!</strong><br>
-                                    Data and images uploaded successfully.
+                                    Data and images uploaded successfully with status "visited".
                                 </div>
                                 """, unsafe_allow_html=True)
                                 st.balloons()
@@ -591,7 +699,7 @@ def main():
                                 time.sleep(2)
                                 st.rerun()
                             else:
-                                st.error("❌ Failed to save data to spreadsheet")
+                                st.error("❌ Failed to save data to main spreadsheet")
                         else:
                             st.error("❌ Failed to upload images")
                             
