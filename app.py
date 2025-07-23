@@ -18,7 +18,7 @@ load_dotenv()
 
 # Page configuration
 st.set_page_config(
-    page_title="You-POSM",
+    page_title="MINISO POSM Data Collection",
     page_icon="📊",
     layout="wide",
     initial_sidebar_state="collapsed"
@@ -129,6 +129,11 @@ st.markdown("""
         color: #721c24;
         border-left: 4px solid #dc3545;
     }
+    .warning-box {
+        background: #fff3cd;
+        color: #856404;
+        border-left: 4px solid #ffc107;
+    }
     
     /* Mobile button styling */
     .stButton > button {
@@ -141,6 +146,15 @@ st.markdown("""
         font-weight: 600;
         font-size: 1rem;
         margin: 0.5rem 0;
+    }
+    
+    /* Checkbox styling */
+    .checkbox-container {
+        background: #f8f9fa;
+        border: 1px solid #dee2e6;
+        border-radius: 8px;
+        padding: 1rem;
+        margin: 1rem 0;
     }
     
     /* Hide Streamlit file uploader label */
@@ -179,6 +193,7 @@ class YouPosmHandler:
         self.bucket = None
         self.main_worksheet = None  # Sheet1 for main data
         self.employee_worksheet = None  # Employee sheet for employee data
+        self.store_worksheet = None  # Store sheet for store data
         self.connection_status = {"sheets": False, "storage": False}
         self._setup_connections()
     
@@ -286,6 +301,15 @@ class YouPosmHandler:
                     # Set headers for employee sheet
                     self.employee_worksheet.append_row(['Employee_Name'])
                 
+                # Get or create store worksheet
+                try:
+                    self.store_worksheet = spreadsheet.worksheet("Store Sheet")
+                except:
+                    # Create store sheet if it doesn't exist
+                    self.store_worksheet = spreadsheet.add_worksheet(title="Store Sheet", rows="1000", cols="1")
+                    # Set headers for store sheet
+                    self.store_worksheet.append_row(['Store_Name'])
+                
                 # Verify sheet structure and create headers if needed
                 self._ensure_sheet_structure()
                 
@@ -317,13 +341,13 @@ class YouPosmHandler:
             return False
     
     def _ensure_sheet_structure(self):
-        """Ensure the spreadsheets have the correct headers"""
+        """Ensure the spreadsheets have the correct headers WITHOUT deleting existing data"""
         try:
-            # Main sheet headers
+            # Main sheet headers - updated to include Notes column
             main_expected_headers = [
                 'Store_Name', 'Employee_Name', 'Date', 
                 'Before_Image_URL', 'After_Image_URL', 
-                'Timestamp', 'Status'
+                'Timestamp', 'Status', 'Notes'
             ]
             
             # Get current headers for main sheet
@@ -332,51 +356,86 @@ class YouPosmHandler:
             except:
                 current_main_headers = []
             
-            # If no headers or headers don't match, set them
-            if not current_main_headers or current_main_headers != main_expected_headers:
-                self.main_worksheet.clear()
-                self.main_worksheet.append_row(main_expected_headers)
-                st.info("📋 Main spreadsheet headers configured")
+            # SAFE header handling - only add if completely empty
+            if not current_main_headers:
+                # Only set headers if sheet is completely empty
+                try:
+                    all_values = self.main_worksheet.get_all_values()
+                    if not all_values or (len(all_values) == 1 and not any(all_values[0])):
+                        # Sheet is truly empty, safe to add headers
+                        self.main_worksheet.clear()
+                        self.main_worksheet.append_row(main_expected_headers)
+                        st.info("📋 Main spreadsheet headers configured (new sheet)")
+                except:
+                    # If we can't check, don't risk clearing data
+                    st.warning("⚠️ Could not verify main sheet structure - preserving existing data")
+            elif current_main_headers != main_expected_headers:
+                # Headers exist but don't match - LOG but DON'T clear
+                st.warning(f"⚠️ Main sheet headers differ from expected format")
+                st.warning(f"Expected: {main_expected_headers}")
+                st.warning(f"Current: {current_main_headers}")
+                st.info("📌 Continuing with existing headers to preserve data")
             
-            # Employee sheet headers
+            # Employee sheet headers - SAFE handling
             employee_expected_headers = ['Employee_Name']
             
-            # Get current headers for employee sheet
             try:
                 current_employee_headers = self.employee_worksheet.row_values(1)
             except:
                 current_employee_headers = []
             
-            # If no headers or headers don't match, set them
-            if not current_employee_headers or current_employee_headers != employee_expected_headers:
-                if current_employee_headers:  # Only clear if there are existing headers
-                    self.employee_worksheet.clear()
-                self.employee_worksheet.append_row(employee_expected_headers)
-                st.info("📋 Employee spreadsheet headers configured")
+            if not current_employee_headers:
+                # Check if sheet is truly empty
+                try:
+                    all_values = self.employee_worksheet.get_all_values()
+                    if not all_values or (len(all_values) == 1 and not any(all_values[0])):
+                        self.employee_worksheet.clear()
+                        self.employee_worksheet.append_row(employee_expected_headers)
+                        st.info("📋 Employee spreadsheet headers configured (new sheet)")
+                except:
+                    st.warning("⚠️ Could not verify employee sheet structure")
+            elif current_employee_headers != employee_expected_headers:
+                st.warning("⚠️ Employee sheet headers differ - preserving existing data")
+            
+            # Store sheet headers - SAFE handling  
+            store_expected_headers = ['Store_Name']
+            
+            try:
+                current_store_headers = self.store_worksheet.row_values(1)
+            except:
+                current_store_headers = []
+            
+            if not current_store_headers:
+                # Check if sheet is truly empty
+                try:
+                    all_values = self.store_worksheet.get_all_values()
+                    if not all_values or (len(all_values) == 1 and not any(all_values[0])):
+                        self.store_worksheet.clear()
+                        self.store_worksheet.append_row(store_expected_headers)
+                        st.info("📋 Store spreadsheet headers configured (new sheet)")
+                except:
+                    st.warning("⚠️ Could not verify store sheet structure")
+            elif current_store_headers != store_expected_headers:
+                st.warning("⚠️ Store sheet headers differ - preserving existing data")
                 
         except Exception as e:
             st.warning(f"Could not verify spreadsheet structure: {str(e)}")
+            st.info("📌 Continuing without header verification to preserve data")
     
     def get_employee_data(self) -> Tuple[List[str], List[str]]:
-        """Get employee data from the employee sheet"""
+        """Get employee data from the employee sheet and store data from store sheet"""
         try:
-            if not self.employee_worksheet:
-                return [], []
+            # Get stores from Store Sheet
+            stores = self.get_stores_from_store_sheet()
             
-            # Get all records from employee sheet
-            records = self.employee_worksheet.get_all_records()
-            if not records:
-                return [], []
-            
-            df = pd.DataFrame(records)
-            
-            # Extract employees from Employee_Name column
+            # Get employees from Employee Sheet
             employees = []
-            if 'Employee_Name' in df.columns:
-                employees = sorted([e for e in df['Employee_Name'].dropna().unique().tolist() if e])
-            
-            # For stores, we'll get from main sheet instead
-            stores = self.get_stores_from_main_sheet()
+            if self.employee_worksheet:
+                records = self.employee_worksheet.get_all_records()
+                if records:
+                    df = pd.DataFrame(records)
+                    if 'Employee_Name' in df.columns:
+                        employees = sorted([e for e in df['Employee_Name'].dropna().unique().tolist() if e])
             
             return stores, employees
             
@@ -384,13 +443,13 @@ class YouPosmHandler:
             st.error(f"❌ Error loading employee data: {str(e)}")
             return [], []
     
-    def get_stores_from_main_sheet(self) -> List[str]:
-        """Get unique stores from main sheet"""
+    def get_stores_from_store_sheet(self) -> List[str]:
+        """Get unique stores from Store Sheet"""
         try:
-            if not self.main_worksheet:
+            if not self.store_worksheet:
                 return []
             
-            records = self.main_worksheet.get_all_records()
+            records = self.store_worksheet.get_all_records()
             if not records:
                 return []
             
@@ -403,6 +462,7 @@ class YouPosmHandler:
             return []
             
         except Exception as e:
+            st.error(f"❌ Error loading stores from Store Sheet: {str(e)}")
             return []
     
     def get_employees_by_store(self, store_name: str) -> List[str]:
@@ -429,6 +489,28 @@ class YouPosmHandler:
             st.error(f"❌ Error loading employees: {str(e)}")
             return []
     
+    def add_store_to_sheet(self, store_name: str) -> bool:
+        """Add new store to Store Sheet"""
+        try:
+            if not self.store_worksheet:
+                return False
+            
+            # Check if store already exists
+            records = self.store_worksheet.get_all_records()
+            for record in records:
+                if record.get('Store_Name', '').strip() == store_name.strip():
+                    return True  # Already exists
+            
+            # Add new store
+            row_data = [store_name.strip()]
+            
+            self.store_worksheet.append_row(row_data)
+            return True
+            
+        except Exception as e:
+            st.error(f"❌ Error adding store: {str(e)}")
+            return False
+    
     def add_employee_to_sheet(self, store_name: str, employee_name: str) -> bool:
         """Add new employee to employee sheet"""
         try:
@@ -452,7 +534,7 @@ class YouPosmHandler:
             return False
     
     def upload_image(self, image: Image.Image, store: str, employee: str, img_type: str) -> Optional[str]:
-        """Upload image to GCS with uniform bucket-level access"""
+        """Upload image to GCS and make it publicly accessible"""
         try:
             if not self.bucket:
                 st.error("❌ Storage bucket not connected")
@@ -469,14 +551,28 @@ class YouPosmHandler:
             
             path = f"you-posm/{clean_store}/{clean_employee}/{date_str}/{img_type}/{timestamp}_{unique_id}.jpg"
             
-            # Optimize image
+            # Optimize image and preserve orientation
+            from PIL import ImageOps
+            
+            # Auto-orient the image based on EXIF data
+            image = ImageOps.exif_transpose(image)
+            
             if image.mode in ("RGBA", "P"):
                 image = image.convert("RGB")
             
-            if image.width > 1920:
-                ratio = 1920 / image.width
-                new_height = int(image.height * ratio)
-                image = image.resize((1920, new_height), Image.Resampling.LANCZOS)
+            # Resize while maintaining aspect ratio (don't force orientation)
+            if image.width > 1920 or image.height > 1920:
+                # Calculate new dimensions maintaining aspect ratio
+                if image.width > image.height:
+                    # Landscape: limit width
+                    new_width = 1920
+                    new_height = int((1920 * image.height) / image.width)
+                else:
+                    # Portrait: limit height  
+                    new_height = 1920
+                    new_width = int((1920 * image.width) / image.height)
+                
+                image = image.resize((new_width, new_height), Image.Resampling.LANCZOS)
             
             # Upload to GCS
             img_bytes = io.BytesIO()
@@ -486,10 +582,22 @@ class YouPosmHandler:
             blob = self.bucket.blob(path)
             blob.upload_from_file(img_bytes, content_type='image/jpeg')
             
-            # Don't try to make public - return the blob name instead
-            # For uniform bucket-level access, we use a different URL format
-            public_url = f"https://storage.googleapis.com/{self.bucket.name}/{path}"
+            # Make the blob publicly readable
+            try:
+                blob.make_public()
+                st.success(f"✅ Image uploaded and made public: {path}")
+            except Exception as e:
+                st.warning(f"⚠️ Image uploaded but could not make public: {str(e)}")
+                # Try alternative: set public read ACL
+                try:
+                    blob.acl.all().grant_read()
+                    blob.acl.save()
+                    st.success(f"✅ Image made public via ACL: {path}")
+                except Exception as e2:
+                    st.warning(f"⚠️ ACL method also failed: {str(e2)}")
             
+            # Return public URL
+            public_url = f"https://storage.googleapis.com/{self.bucket.name}/{path}"
             return public_url
             
         except Exception as e:
@@ -511,7 +619,8 @@ class YouPosmHandler:
                 data['before_image_url'],     # Before_Image_URL
                 data['after_image_url'],      # After_Image_URL
                 data['timestamp'],            # Timestamp
-                'visited'                     # Status - changed from 'Active' to 'visited'
+                data['status'],               # Status - can be 'visited' or 'Out Of Stock'
+                data.get('notes', '')         # Notes - additional information
             ]
             
             self.main_worksheet.append_row(row_data)
@@ -525,7 +634,7 @@ def main():
     # Clean header
     st.markdown("""
     <div class="main-header">
-        <h1>📊 You-POSM</h1>
+        <h1>📊 MINISO POSM Data Collection</h1>
         <p>Store Data Collection System</p>
     </div>
     """, unsafe_allow_html=True)
@@ -559,8 +668,8 @@ def main():
         """)
         st.stop()
     
-    # Get employee data from employee sheet
-    with st.spinner("📊 Loading employee data..."):
+    # Get employee and store data from respective sheets
+    with st.spinner("📊 Loading store and employee data..."):
         stores, all_employees = st.session_state.handler.get_employee_data()
     
     # Main data collection form
@@ -599,7 +708,15 @@ def main():
         # Date (compact)
         entry_date = st.date_input("📅 Date", value=date.today())
         
-        # Image uploads (mobile-optimized)
+        # Out of Stock Checkbox
+        st.markdown('<div class="checkbox-container">', unsafe_allow_html=True)
+        out_of_stock = st.checkbox(
+            "📦 Product is out of stock in store",
+            help="Check this if the product/display couldn't be set up due to stock issues"
+        )
+        st.markdown('</div>', unsafe_allow_html=True)
+        
+        # Image uploads (always show both)
         st.markdown("**📸 Upload Images**")
         col1, col2 = st.columns(2)
         
@@ -611,7 +728,7 @@ def main():
                 key="before_img"
             )
             if before_image:
-                st.image(before_image, use_column_width=True)
+                st.image(before_image, use_container_width=True)
         
         with col2:
             st.markdown("**After**")
@@ -621,7 +738,16 @@ def main():
                 key="after_img"
             )
             if after_image:
-                st.image(after_image, use_column_width=True)
+                st.image(after_image, use_container_width=True)
+        
+        # Optional notes (only show if NOT out of stock)
+        notes = ""
+        if not out_of_stock:
+            notes = st.text_area(
+                "📝 Additional Notes (Optional)",
+                placeholder="Any additional information about this visit...",
+                key="notes_input"
+            )
         
         # Submit button (full width)
         submitted = st.form_submit_button("💾 Submit Entry", type="primary")
@@ -646,20 +772,28 @@ def main():
                 </div>
                 """, unsafe_allow_html=True)
             else:
-                # Process submission
-                with st.spinner("📤 Uploading data and images..."):
+                # Process submission - ALL submissions have status "Visited"
+                with st.spinner("📤 Uploading entry..."):
                     try:
+                        # Step 1: Process images
                         before_img = Image.open(before_image)
                         after_img = Image.open(after_image)
                         
-                        # Add employee to employee sheet if new
+                        # Step 2: Handle new store
+                        if store_selection == "+ New Store":
+                            success = st.session_state.handler.add_store_to_sheet(store_name)
+                            if not success:
+                                st.error("❌ Failed to add store to Store Sheet")
+                                st.stop()
+                        
+                        # Step 3: Handle new employee
                         if employee_selection == "+ New Employee":
                             success = st.session_state.handler.add_employee_to_sheet(store_name, employee_name)
                             if not success:
                                 st.error("❌ Failed to add employee to employee sheet")
                                 st.stop()
                         
-                        # Upload images
+                        # Step 4: Upload images
                         before_url = st.session_state.handler.upload_image(
                             before_img, store_name, employee_name, "before"
                         )
@@ -668,7 +802,10 @@ def main():
                         )
                         
                         if before_url and after_url:
-                            # Prepare data for main spreadsheet (Sheet1)
+                            # Determine notes based on out of stock checkbox
+                            final_notes = "Out of Stock" if out_of_stock else (notes.strip() if notes else "")
+                            
+                            # Prepare data - Status is ALWAYS "Visited"
                             data = {
                                 'store_name': store_name.strip(),
                                 'employee_name': employee_name.strip(),
@@ -676,30 +813,46 @@ def main():
                                 'before_image_url': before_url,
                                 'after_image_url': after_url,
                                 'timestamp': datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                                'status': 'Visited',  # Always "Visited"
+                                'notes': final_notes
                             }
                             
+                            # Save to spreadsheet
                             if st.session_state.handler.save_data(data):
-                                st.markdown("""
+                                # Success message
+                                if out_of_stock:
+                                    success_msg = "✅ Out of Stock Visit Recorded!"
+                                    detail_msg = 'Entry saved with status "Visited" and notes "Out of Stock".'
+                                else:
+                                    success_msg = "✅ Visit Recorded!"
+                                    detail_msg = 'Entry saved with status "Visited".'
+                                
+                                st.markdown(f"""
                                 <div class="message-box success-box">
-                                    <strong>✅ Success!</strong><br>
-                                    Data and images uploaded successfully with status "visited".
+                                    <strong>{success_msg}</strong><br>
+                                    {detail_msg}
                                 </div>
                                 """, unsafe_allow_html=True)
                                 st.balloons()
                                 
-                                # Show uploaded images (mobile optimized)
+                                # Show uploaded images
                                 st.markdown("**📷 Uploaded Images:**")
                                 col1, col2 = st.columns(2)
                                 with col1:
-                                    st.image(before_url, caption=f"Before - {store_name}", use_column_width=True)
+                                    st.image(before_url, caption=f"Before - {store_name}", use_container_width=True)
                                 with col2:
-                                    st.image(after_url, caption=f"After - {store_name}", use_column_width=True)
+                                    st.image(after_url, caption=f"After - {store_name}", use_container_width=True)
                                 
-                                # Auto-refresh in 3 seconds to show updated dropdown data
+                                # Show final data summary
+                                st.markdown("**📊 Saved Data:**")
+                                st.write(f"- **Status:** Visited")
+                                st.write(f"- **Notes:** {final_notes if final_notes else 'None'}")
+                                
+                                # Auto-refresh in 3 seconds
                                 time.sleep(2)
                                 st.rerun()
                             else:
-                                st.error("❌ Failed to save data to main spreadsheet")
+                                st.error("❌ Failed to save data to spreadsheet")
                         else:
                             st.error("❌ Failed to upload images")
                             
