@@ -708,14 +708,6 @@ def main():
         # Date (compact)
         entry_date = st.date_input("📅 Date", value=date.today())
         
-        # Out of Stock Checkbox
-        st.markdown('<div class="checkbox-container">', unsafe_allow_html=True)
-        out_of_stock = st.checkbox(
-            "📦 Product is out of stock in store",
-            help="Check this if the product/display couldn't be set up due to stock issues"
-        )
-        st.markdown('</div>', unsafe_allow_html=True)
-        
         # Image uploads (always show both)
         st.markdown("**📸 Upload Images**")
         col1, col2 = st.columns(2)
@@ -739,15 +731,31 @@ def main():
             )
             if after_image:
                 st.image(after_image, use_container_width=True)
+
+        # Product Stock Status Checkboxes
+        st.markdown('<div class="checkbox-container">', unsafe_allow_html=True)
+        st.markdown("**📦 Stock Kosong (OOS):**")
+        st.markdown("*Check the boxes for products that are out of stock*")
         
-        # Optional notes (only show if NOT out of stock)
-        notes = ""
-        if not out_of_stock:
-            notes = st.text_area(
-                "📝 Additional Notes (Optional)",
-                placeholder="Any additional information about this visit...",
-                key="notes_input"
-            )
+        # Create columns for better mobile layout
+        col1, col2 = st.columns(2)
+        
+        with col1:
+            pam7_out = st.checkbox("PAM7 - Out of Stock", key="pam7_stock")
+            pkm7_out = st.checkbox("PKM7 - Out of Stock", key="pkm7_stock")
+        
+        with col2:
+            pfb7_out = st.checkbox("PFB7 - Out of Stock", key="pfb7_stock")
+            pko7_out = st.checkbox("PKO7 - Out of Stock", key="pko7_stock")
+        
+        st.markdown('</div>', unsafe_allow_html=True)
+        
+        # Optional notes (always available now)
+        notes = st.text_area(
+            "📝 Additional Notes (Optional)",
+            placeholder="Any additional information about this visit...",
+            key="notes_input"
+        )
         
         # Submit button (full width)
         submitted = st.form_submit_button("💾 Submit Entry", type="primary")
@@ -802,8 +810,36 @@ def main():
                         )
                         
                         if before_url and after_url:
-                            # Determine notes based on out of stock checkbox
-                            final_notes = "Out of Stock" if out_of_stock else (notes.strip() if notes else "")
+                            # Generate notes based on product stock status
+                            out_of_stock_products = []
+                            if pam7_out:
+                                out_of_stock_products.append("PAM7")
+                            if pfb7_out:
+                                out_of_stock_products.append("PFB7")
+                            if pkm7_out:
+                                out_of_stock_products.append("PKM7")
+                            if pko7_out:
+                                out_of_stock_products.append("PKO7")
+                            
+                            # Determine final notes
+                            stock_notes = ""
+                            if len(out_of_stock_products) == 4:
+                                stock_notes = "Out of Stock: All products"
+                            elif len(out_of_stock_products) > 0:
+                                stock_notes = f"Out of Stock: {', '.join(out_of_stock_products)}"
+                            else:
+                                stock_notes = ""  # All products available
+                            
+                            # Combine stock notes with user notes
+                            user_notes = notes.strip() if notes else ""
+                            if stock_notes and user_notes:
+                                final_notes = f"{stock_notes}. {user_notes}"
+                            elif stock_notes:
+                                final_notes = stock_notes
+                            elif user_notes:
+                                final_notes = user_notes
+                            else:
+                                final_notes = ""
                             
                             # Prepare data - Status is ALWAYS "Visited"
                             data = {
@@ -819,13 +855,16 @@ def main():
                             
                             # Save to spreadsheet
                             if st.session_state.handler.save_data(data):
-                                # Success message
-                                if out_of_stock:
-                                    success_msg = "✅ Out of Stock Visit Recorded!"
-                                    detail_msg = 'Entry saved with status "Visited" and notes "Out of Stock".'
+                                # Success message based on stock status
+                                if len(out_of_stock_products) == 4:
+                                    success_msg = "✅ All Products Out of Stock - Visit Recorded!"
+                                    detail_msg = 'Entry saved with status "Visited" and noted all products out of stock.'
+                                elif len(out_of_stock_products) > 0:
+                                    success_msg = f"✅ Partial Stock Issues - Visit Recorded!"
+                                    detail_msg = f'Entry saved with status "Visited". Out of stock: {", ".join(out_of_stock_products)}'
                                 else:
-                                    success_msg = "✅ Visit Recorded!"
-                                    detail_msg = 'Entry saved with status "Visited".'
+                                    success_msg = "✅ All Products Available - Visit Recorded!"
+                                    detail_msg = 'Entry saved with status "Visited". All products available.'
                                 
                                 st.markdown(f"""
                                 <div class="message-box success-box">
